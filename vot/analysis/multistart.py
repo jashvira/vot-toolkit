@@ -30,7 +30,13 @@ def compute_eao_partial(overlaps: List, success: List[bool], curve_length: int):
     phi = curve_length * [float(0)]
     active = curve_length * [float(0)]
 
-    for o, success in zip(overlaps, success):
+    # print("active", len(active))
+
+    # Print len of each internal  overlaps
+    # for o in overlaps:
+    #     print(len(o))
+
+    for o, s in zip(overlaps, success):
 
         o_array = np.array(o)
 
@@ -39,11 +45,14 @@ def compute_eao_partial(overlaps: List, success: List[bool], curve_length: int):
             if j < len(o):
                 phi[j] += np.mean(o_array[1:j+1])
                 active[j] += 1
-            elif not success:
+            elif not s:
                 phi[j] += np.sum(o_array[1:len(o)]) / (j - 1)
                 active[j] += 1
-
+    # print("active", len(active))
+    # Print indixes where active is 0
+    # print([i for i, x in enumerate(active) if x == 0])
     phi = [p / a if a > 0 else 0 for p, a in zip(phi, active)]
+    # print(phi)
     return phi, active
 
 
@@ -110,7 +119,7 @@ class AccuracyRobustness(SeparableAnalysis):
             trajectory = Trajectory.read(results, name)
 
             overlaps = calculate_overlaps(trajectory.regions(), proxy.groundtruth(), (proxy.size) if self.burnin else None)
-
+           
             grace = self.grace
             progress = len(proxy)
 
@@ -130,6 +139,40 @@ class AccuracyRobustness(SeparableAnalysis):
         ar = (robustness / total, accuracy / robustness if robustness > 0 else 0)
 
         return accuracy / robustness if robustness > 0 else 0, robustness / total, ar, robustness, len(sequence)
+
+def multistart_ar(sequence, names, starts, trajectories, burnin, grace, threshold):
+    robustness = 0
+    accuracy = 0
+    total = 0
+
+    for name, (i, reverse) in zip(names, starts):
+        if reverse:
+            proxy = FrameMapSequence(sequence, list(reversed(range(0, i + 1))))
+        else:
+            proxy = FrameMapSequence(sequence, list(range(i, len(sequence))))
+
+        trajectory = trajectories[name]
+
+        overlaps = calculate_overlaps(trajectory.regions(), proxy.groundtruth(), (proxy.size) if burnin else None)
+        # print(overlaps)
+        curr_grace = grace
+        progress = len(proxy)
+
+        for j, overlap in enumerate(overlaps):
+            if overlap <= threshold and not proxy.groundtruth(j).is_empty():
+                curr_grace = curr_grace - 1
+                if curr_grace == 0:
+                    progress = j + 1 - grace  # subtract since we need actual point of the failure
+                    break
+            else:
+                curr_grace = grace
+
+        robustness += progress  # simplified original equation: len(proxy) * (progress / len(proxy))
+        accuracy += sum(overlaps[0:progress])
+        total += len(proxy)
+    ar = (robustness / total, accuracy / robustness if robustness > 0 else 0)
+    return (accuracy / robustness if robustness > 0 else 0, robustness / total, ar, robustness, len(sequence))
+
 
 @analysis_registry.register("multistart_average_ar")
 class AverageAccuracyRobustness(SequenceAggregator):
@@ -184,6 +227,21 @@ class AverageAccuracyRobustness(SequenceAggregator):
 
         return total_accuracy / weight_accuracy, total_robustness / weight_robustness, ar, weight_accuracy, weight_robustness
 
+def multistart_average_ar(results):
+    total_accuracy = 0
+    total_robustness = 0
+    weight_accuracy = 0
+    weight_robustness = 0
+
+    for accuracy, robustness, _, accuracy_w, robustness_w in results:
+        total_accuracy += accuracy * accuracy_w
+        total_robustness += robustness * robustness_w
+        weight_accuracy += accuracy_w
+        weight_robustness += robustness_w
+
+
+    return total_accuracy / weight_accuracy, total_robustness / weight_robustness, weight_accuracy, weight_robustness
+
 @analysis_registry.register("multistart_fragments")
 class MultiStartFragments(SeparableAnalysis):
     """This analysis computes the accuracy-robustness curve for the multistart experiment."""
@@ -224,41 +282,88 @@ class MultiStartFragments(SeparableAnalysis):
 
         if not forward and not backward:
             raise RuntimeError("Sequence does not contain any anchors")
+        
+        starts = [(f, False) for f in forward] + [(f, True) for f in backward]
+        names = ["%s_%08d" % (sequence.name, i) for i, _ in starts]
 
-        accuracy = []
-        success = []
-
-        for i, reverse in [(f, False) for f in forward] + [(f, True) for f in backward]:
-            name = "%s_%08d" % (sequence.name, i)
-
+        trajectories = {}
+        for name in names:
             if not Trajectory.exists(results, name):
                 raise MissingResultsException()
+            trajectories[name] = Trajectory.read(results, name)
+        
+        return multi_start_fragments(
+            sequence, names, starts, trajectories,
+            burnin=self.burnin,
+            grace=self.grace,
+            threshold=self.threshold)
 
-            if reverse:
-                proxy = FrameMapSequence(sequence, list(reversed(range(0, i + 1))))
+        # accuracy = []
+        # success = []
+
+        # for i, reverse in [(f, False) for f in forward] + [(f, True) for f in backward]:
+        #     name = "%s_%08d" % (sequence.name, i)
+
+        #     if not Trajectory.exists(results, name):
+        #         raise MissingResultsException()
+
+        #     if reverse:
+        #         proxy = FrameMapSequence(sequence, list(reversed(range(0, i + 1))))
+        #     else:
+        #         proxy = FrameMapSequence(sequence, list(range(i, len(sequence))))
+
+        #     trajectory = Trajectory.read(results, name)
+
+        #     overlaps = calculate_overlaps(trajectory.regions(), proxy.groundtruth(), (proxy.size) if self.burnin else None)
+
+        #     grace = self.grace
+        #     progress = len(proxy)
+
+        #     for j, overlap in enumerate(overlaps):
+        #         if overlap <= self.threshold and not proxy.groundtruth(j).is_empty():
+        #             grace = grace - 1
+        #             if grace == 0:
+        #                 progress = j + 1 - self.grace  # subtract since we need actual point of the failure
+        #                 break
+        #         else:
+        #             grace = self.grace
+
+        #     success.append( (i / len(sequence), progress / len(proxy)))
+        #     accuracy.append( (i / len(sequence), sum(overlaps[0:progress] / len(proxy))))
+
+        # return success, accuracy
+
+
+def multi_start_fragments(sequence, names, starts, trajectories, burnin, grace, threshold):
+    accuracy = []
+    success = []
+
+    for name, (i, reverse) in zip(names, starts):
+        if reverse:
+            proxy = FrameMapSequence(sequence, list(reversed(range(0, i + 1))))
+        else:
+            proxy = FrameMapSequence(sequence, list(range(i, len(sequence))))
+
+        trajectory = trajectories[name]
+
+        overlaps = calculate_overlaps(trajectory.regions(), proxy.groundtruth(), (proxy.size) if burnin else None)
+
+        curr_grace = grace
+        progress = len(proxy)
+
+        for j, overlap in enumerate(overlaps):
+            if overlap <= threshold and not proxy.groundtruth(j).is_empty():
+                curr_grace = curr_grace - 1
+                if curr_grace == 0:
+                    progress = j + 1 - grace  # subtract since we need actual point of the failure
+                    break
             else:
-                proxy = FrameMapSequence(sequence, list(range(i, len(sequence))))
+                curr_grace = grace
 
-            trajectory = Trajectory.read(results, name)
+        success.append( (i / len(sequence), progress / len(proxy)))
+        accuracy.append( (i / len(sequence), sum(np.array(overlaps[0:progress]) / len(proxy))))
 
-            overlaps = calculate_overlaps(trajectory.regions(), proxy.groundtruth(), (proxy.size) if self.burnin else None)
-
-            grace = self.grace
-            progress = len(proxy)
-
-            for j, overlap in enumerate(overlaps):
-                if overlap <= self.threshold and not proxy.groundtruth(j).is_empty():
-                    grace = grace - 1
-                    if grace == 0:
-                        progress = j + 1 - self.grace  # subtract since we need actual point of the failure
-                        break
-                else:
-                    grace = self.grace
-
-            success.append( (i / len(sequence), progress / len(proxy)))
-            accuracy.append( (i / len(sequence), sum(overlaps[0:progress] / len(proxy))))
-
-        return success, accuracy
+    return success, accuracy
 
 # TODO: remove high
 @analysis_registry.register("multistart_eao_curves")
@@ -345,6 +450,42 @@ class EAOCurves(SeparableAnalysis):
             success_all.append(success)
 
         return compute_eao_partial(overlaps_all, success_all, self.high), 1
+    
+def compute_eao_curves(sequence, names, starts, trajectories, burnin, grace, threshold, high):
+    overlaps_all = []
+    success_all = []
+    for name, (i, reverse) in zip(names, starts):
+        if reverse:
+            proxy = FrameMapSequence(sequence, list(reversed(range(0, i + 1))))
+        else:
+            proxy = FrameMapSequence(sequence, list(range(i, len(sequence))))
+
+        trajectory = trajectories[name]
+        overlaps = calculate_overlaps(trajectory.regions(), proxy.groundtruth(), proxy.size if burnin else None)
+
+        curr_grace = grace
+        progress = len(proxy)
+
+        for j, overlap in enumerate(overlaps):
+            if overlap <= threshold and not proxy.groundtruth(j).is_empty():
+                curr_grace = curr_grace - 1
+                if curr_grace == 0:
+                    progress = j + 1 - grace  # subtract since we need actual point of the failure
+                    break
+            else:
+                curr_grace = grace
+
+        success = True
+        if progress < len(overlaps):
+            # tracker has failed during this run
+            overlaps[progress:] = (len(overlaps) - progress) * [float(0)]
+            success = False
+
+        overlaps_all.append(overlaps)
+        success_all.append(success)
+    # print(success_all)
+
+    return compute_eao_partial(overlaps_all, success_all, high), 1
 
 #TODO: remove high
 @analysis_registry.register("multistart_eao_curve")
@@ -392,6 +533,18 @@ class EAOCurve(SequenceAggregator):
 
         return [eao_ / w_ if w_ > 0 else 0 for eao_, w_ in zip(eao_curve, eao_weights)],
 
+def compute_aggregate_curve(results, high):
+    eao_curve = high * [float(0)]
+    eao_weights = high * [float(0)]
+
+    for (seq_eao_curve, eao_active), seq_w in results:
+        # print(seq_eao_curve)
+        for i, (eao_, active_) in enumerate(zip(seq_eao_curve, eao_active)):
+            eao_curve[i] += eao_ * active_ * seq_w
+            eao_weights[i] += active_ * seq_w
+
+    return [eao_ / w_ if w_ > 0 else 0 for eao_, w_ in zip(eao_curve, eao_weights)],
+
 @analysis_registry.register("multistart_eao_score")
 class EAOScore(Analysis):
     """This analysis computes the expected average overlap score for the multistart experiment. It does this by computing the EAO curve and then integrating it."""
@@ -437,3 +590,5 @@ class EAOScore(Analysis):
         """Return the axes of the analysis."""
         return Axes.TRACKERS
 
+def eao_score(curve):
+    return curve[0].foreach(lambda x, i, j: (float(np.mean(x[0][115:755+ 1])), ) )

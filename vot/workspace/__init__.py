@@ -137,7 +137,7 @@ class Workspace(Attributee):
         _logger.info("Download completed")
 
     @staticmethod
-    def load(directory):
+    def load(directory, **kwargs):
         """Load a workspace from a given location. This 
 
         Args:
@@ -157,7 +157,7 @@ class Workspace(Attributee):
         with open(config_file, 'r') as fp:
             config = yaml.load(fp, Loader=yaml.BaseLoader)
 
-            return Workspace(directory, **config)
+            return Workspace(directory, **config, **kwargs)
 
     def __init__(self, directory: str, **kwargs):
         """Do not call this constructor directly unless you know what you are doing, 
@@ -175,10 +175,10 @@ class Workspace(Attributee):
         
         dataset_directory = normalize_path(self.sequences, directory)
 
-        if not self.stack.dataset is None:
-            Workspace.download_dataset(self.stack.dataset, dataset_directory)
+        # if not self.stack.dataset is None:
+        #     Workspace.download_dataset(self.stack.dataset, dataset_directory)
 
-        self._dataset = load_dataset(dataset_directory)
+        # self._dataset = load_dataset(dataset_directory)
 
     @property
     def directory(self) -> str:

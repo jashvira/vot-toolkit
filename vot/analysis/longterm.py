@@ -7,6 +7,7 @@ import itertools
 from attributee import Float, Integer, Boolean, Include
 
 from vot.tracker import Tracker
+from vot.tracker.results import Trajectory
 from vot.dataset import Sequence
 from vot.region import Region, RegionType, calculate_overlaps
 from vot.experiment import Experiment
@@ -32,7 +33,7 @@ def determine_thresholds(scores: Iterable[float], resolution: int) -> List[float
 
     if len(scores) > resolution - 2:
         delta = math.floor(len(scores) / (resolution - 2))
-        idxs = np.round(np.linspace(delta, len(scores) - delta, num=resolution - 2)).astype(np.int)
+        idxs = np.round(np.linspace(delta, len(scores) - delta, num=resolution - 2)).astype(int)
         thresholds = [scores[idx] for idx in idxs]
     else:
         thresholds = scores
@@ -108,17 +109,28 @@ class _ConfidenceScores(SeparableAnalysis):
             Tuple[Any]: Confidence scores for the given sequence.
         """
 
-        scores_all = []
+        # scores_all = []
         trajectories = experiment.gather(tracker, sequence)
 
         if len(trajectories) == 0:
             raise MissingResultsException("Missing results for sequence {}".format(sequence.name))
 
-        for trajectory in trajectories:
-            confidence = [trajectory.properties(i).get('confidence', 0) for i in range(len(trajectory))]
-            scores_all.extend(confidence)
+        # for trajectory in trajectories:
+        #     confidence = [trajectory.properties(i).get('confidence', 0) for i in range(len(trajectory))]
+        #     scores_all.extend(confidence)
 
-        return scores_all,
+        # return scores_all,
+        return confidence_scores(trajectories),
+
+def confidence_scores(trajectories : List[Trajectory]) -> List[float]:
+    scores_all = []
+
+    for trajectory in trajectories:
+        confidence = [trajectory.properties(i).get('confidence', 0) for i in range(len(trajectory))]
+        scores_all.extend(confidence)
+
+    return scores_all
+
 
 class _Thresholds(SequenceAggregator):
     """Computes the thresholds for a tracker for given sequences. This is internal analysis and should not be used directly."""
@@ -153,9 +165,18 @@ class _Thresholds(SequenceAggregator):
         Returns:
             Tuple[Any]: Thresholds for the given sequences."""
 
-        thresholds = determine_thresholds(itertools.chain(*[result[0] for result in results]), self.resolution),
+        # thresholds = determine_thresholds(itertools.chain(*[result[0] for result in results]), self.resolution),
+        thresholds = determine_thresholds_sequences(results, self.resolution),
 
         return thresholds,
+
+def determine_thresholds_sequences(confidence_scores, resolution):
+    """
+    Args:
+        confidence_scores: List of confidence scores for each sequence.
+    """
+    return determine_thresholds(itertools.chain(*[result for result in confidence_scores]), resolution)
+
 
 @analysis_registry.register("pr_curves")
 class PrecisionRecallCurves(SeparableAnalysis):
@@ -199,20 +220,41 @@ class PrecisionRecallCurves(SeparableAnalysis):
 
         trajectories = experiment.gather(tracker, sequence)
 
-        if len(trajectories) == 0:
-            raise MissingResultsException()
+        return (
+            precision_recall_curves(trajectories, thresholds, sequence, self.ignore_unknown, self.bounded),
+            thresholds)
 
-        precision = len(thresholds) * [float(0)]
-        recall = len(thresholds) * [float(0)]
-        for trajectory in trajectories:
-            confidence = [trajectory.properties(i).get('confidence', 0) for i in range(len(trajectory))]
-            pr, re = compute_tpr_curves(trajectory.regions(), confidence, sequence, thresholds, self.ignore_unknown, self.bounded)
-            for i in range(len(thresholds)):
-                precision[i] += pr[i]
-                recall[i] += re[i]
+#         if len(trajectories) == 0:
+#             raise MissingResultsException()
+
+#         precision = len(thresholds) * [float(0)]
+#         recall = len(thresholds) * [float(0)]
+#         for trajectory in trajectories:
+#             confidence = [trajectory.properties(i).get('confidence', 0) for i in range(len(trajectory))]
+#             pr, re = compute_tpr_curves(trajectory.regions(), confidence, sequence, thresholds, self.ignore_unknown, self.bounded)
+#             for i in range(len(thresholds)):
+#                 precision[i] += pr[i]
+#                 recall[i] += re[i]
+
+# #         return [(re / len(trajectories), pr / len(trajectories)) for pr, re in zip(precision, recall)], thresholds
+#         return [(pr / len(trajectories), re / len(trajectories)) for pr, re in zip(precision, recall)], thresholds
+
+
+def precision_recall_curves(trajectories, thresholds, sequence, ignore_unknown=True, bounded=True):
+    if len(trajectories) == 0:
+        raise MissingResultsException()
+
+    precision = len(thresholds) * [float(0)]
+    recall = len(thresholds) * [float(0)]
+    for trajectory in trajectories:
+        confidence = [trajectory.properties(i).get('confidence', 0) for i in range(len(trajectory))]
+        pr, re = compute_tpr_curves(trajectory.regions(), confidence, sequence, thresholds, ignore_unknown, bounded)
+        for i in range(len(thresholds)):
+            precision[i] += pr[i]
+            recall[i] += re[i]
 
 #         return [(re / len(trajectories), pr / len(trajectories)) for pr, re in zip(precision, recall)], thresholds
-        return [(pr / len(trajectories), re / len(trajectories)) for pr, re in zip(precision, recall)], thresholds
+    return [(pr / len(trajectories), re / len(trajectories)) for pr, re in zip(precision, recall)]
 
 @analysis_registry.register("pr_curve")
 class PrecisionRecallCurve(SequenceAggregator):
@@ -262,6 +304,18 @@ class PrecisionRecallCurve(SequenceAggregator):
         curve = [(re / len(results), pr / len(results)) for pr, re in curve]
 
         return curve, thresholds
+
+
+def overall_precision_recall(curves):
+    curves = np.asarray(curves)
+    curve = np.mean(curves, axis=0)
+    return [tuple(row) for row in curve]
+
+    # curve = None
+    # for partial in curves:
+    #     curve = [(pr1 + pr2, re1 + re2) for (pr1, re1), (pr2, re2) in zip(curve, partial)]
+
+    # curve = [(re / len(results), pr / len(results)) for pr, re in curve]
 
 
 @analysis_registry.register("f_curve")
@@ -315,6 +369,13 @@ class FScoreCurve(Analysis):
     def axes(self):
         """Axes of the analysis."""
         return Axes.TRACKERS
+    
+def compute_fscore(pr_curve):
+
+    beta2 = (1*1)
+    f_curve = [((1 + beta2) * pr_ * re_) / (beta2 * pr_ + re_) for pr_, re_ in pr_curve]
+
+    return f_curve
 
 @analysis_registry.register("average_tpr")
 class PrecisionRecall(Analysis):

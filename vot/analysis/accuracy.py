@@ -12,6 +12,7 @@ from vot.analysis import (Measure,
                           is_special, SeparableAnalysis,
                           analysis_registry, Curve)
 from vot.dataset import Sequence
+from vot.dataset.proxy import FrameMapSequence
 from vot.experiment import Experiment
 from vot.experiment.multirun import (MultiRunExperiment)
 from vot.region import Region, calculate_overlaps
@@ -34,7 +35,7 @@ def gather_overlaps(trajectory: List[Region], groundtruth: List[Region], burnin:
     Returns:
         np.ndarray: List of overlaps."""
 
-    overlaps = np.array(calculate_overlaps(trajectory, groundtruth, bounds))
+    overlaps = calculate_overlaps(trajectory, groundtruth, bounds)
     mask = np.ones(len(overlaps), dtype=bool)
 
     if threshold is None: threshold = -1
@@ -54,10 +55,11 @@ def gather_overlaps(trajectory: List[Region], groundtruth: List[Region], burnin:
                 mask[j] = False
         elif is_special(region_tr, Trajectory.FAILURE):
             mask[i] = False
+        
         elif overlaps[i] <= threshold:
             mask[i] = False
 
-    return overlaps[mask]
+    return np.array(overlaps)[mask]
 
 @analysis_registry.register("accuracy")
 class SequenceAccuracy(SeparableAnalysis):
@@ -117,6 +119,36 @@ class SequenceAccuracy(SeparableAnalysis):
 
         return objects_accuracy / len(objects),
 
+def compute_sequence_accuracy(sequence, names, starts, trajectories, burnin):
+
+    threshold = None
+    objects = sequence.objects()
+    objects_accuracy = 0
+    bounds = (sequence.size)
+
+    for object in objects:
+        if len(trajectories) == 0:
+            raise MissingResultsException()
+
+        cummulative = 0
+
+        for name, (i, reverse) in zip(names, starts):
+            if reverse:
+                proxy = FrameMapSequence(sequence, list(reversed(range(0, i + 1))))
+            else:
+                proxy = FrameMapSequence(sequence, list(range(i, len(sequence))))
+
+            trajectory = trajectories[name]
+            overlaps = gather_overlaps(trajectory.regions(), proxy.groundtruth(), burnin, 
+                                    ignore_unknown=True, ignore_invisible=False, bounds=bounds, threshold=threshold)
+            if overlaps.size > 0:
+                cummulative += np.mean(overlaps)
+
+        objects_accuracy += cummulative / len(trajectories)
+
+    return objects_accuracy / len(objects)
+
+
 @analysis_registry.register("average_accuracy")
 class AverageAccuracy(SequenceAggregator):
     """Average accuracy analysis. Computes average overlap between predicted and groundtruth regions."""
@@ -168,6 +200,25 @@ class AverageAccuracy(SequenceAggregator):
                 frames += 1
 
         return accuracy / frames,
+
+def compute_average_accuracy(sequences, results, weighted):
+    accuracy = 0
+    frames = 0
+
+    for i, sequence in enumerate(sequences):
+        if results[i] is None:
+            continue
+
+        if weighted:
+            accuracy += results[i] * len(sequence)
+            frames += len(sequence)
+        else:
+            accuracy += results[i]
+            frames += 1
+
+    return accuracy / frames
+
+
 
 @analysis_registry.register("success_plot")
 class SuccessPlot(SeparableAnalysis):
